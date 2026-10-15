@@ -87,3 +87,48 @@ subtract. That is a *race condition* (a lost update, or a negative balance stopp
    see that the client gets told "success" for a transfer that never happened.
 3. Change `response_body` back to `JSONB` and run `test_retry_returns_original_result...`. Why does
    `r.json() == first.json()` still pass while `r.content == first.content` fails?
+
+## Phase 4: Concurrency (row locking, deadlock avoidance, concurrency + invariant tests)
+
+**What was built**
+- `_lock_account()` uses `session.get(..., with_for_update=True)`, which sends `SELECT ... FOR UPDATE`.
+- `_lock_accounts_in_order()` locks both accounts of a transfer in ascending id order.
+- Account opening locks the shared system account before debiting it.
+- `tests/test_concurrency.py` starts threads behind a `Barrier`, so they all fire at the same instant. Each thread has its own DB connection. It covers:
+  - 100 parallel A→B transfers;
+  - 50 A→B + 50 B→A at once;
+  - an overdraft race (exactly 50 of 100 can be afforded);
+  - the same Idempotency-Key sent 20 times at once;
+  - 300 random concurrent transfers (total money unchanged);
+  - 50 parallel account openings;
+  - 30 parallel unique-key transfers.
+
+**What I observed while building it.** I wrote these tests *before* adding the locks and ran them
+against the Phase 3 code: 6 of the 7 failed. There were lost updates (most of the 100 "successful" transfers
+left no trace in the balances), every overdraft attempt was accepted, and total customer money changed.
+Only the same-key test passed, because the unique index on `idempotency_keys` already serialises those requests.
+After adding ordered `FOR UPDATE`, all 7 pass. They passed in 10 repeated runs.
+I also removed the `sorted()` as an experiment: the opposite-direction test then fails with
+`psycopg.errors.DeadlockDetected`.
+
+**Key concepts**
+- *Race condition / lost update.* Two transactions read balance 100. Each writes `100 - 1 = 99`. One write is lost.
+- *Row-level lock (`FOR UPDATE`).* The second transaction's SELECT *waits* until the first commits,
+  then reads the new value. Only rows touched by the transfer are locked, not the whole table.
+- *Isolation level.* We use Postgres's default **READ COMMITTED** plus explicit locks. Each statement sees
+  data committed before it started. SERIALIZABLE would also prevent the race, but it does so by
+  *aborting* one transaction (error 40001), which the app must then retry. Explicit locks make
+  transactions wait instead of fail, which is simpler for this code.
+- *Deadlock.* T1 holds A and wants B. T2 holds B and wants A. Neither can proceed. Postgres detects the
+  cycle (after `deadlock_timeout`, 1 s by default) and kills one. **Lock ordering** (always lowest id first) makes the cycle impossible.
+- *Hot row.* Every funded account opening locks the one system account, so openings are serialised. That is fine here,
+  but in a real bank you would shard the funding account or batch openings.
+
+**Break it to learn it**
+1. Remove `sorted()` from `_lock_accounts_in_order` and run
+   `pytest tests/test_concurrency.py::test_opposite_directions_do_not_deadlock`. You get `DeadlockDetected`.
+   Through the API that error becomes a 503, and a client retry with the same key is safe. Why?
+2. Change `_lock_account` back to a plain `session.get(Account, account_id)` (no lock) and run
+   `pytest tests/test_concurrency.py`. Look at how much money "disappears" or appears.
+3. Keep the locks but drop the `CHECK (balance_paise >= 0 ...)` constraint, then remove the
+   `InsufficientFunds` check. The overdraft race test now drives A negative. Which layer would have caught it?

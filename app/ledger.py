@@ -4,6 +4,11 @@
 # The one rule everything here follows: money only ever moves through _move_money(), which
 # writes a DEBIT entry, a CREDIT entry and both balance changes in the SAME database transaction.
 # Either all four writes are committed or none are (atomicity), so money can't be lost half-way.
+#
+# Concurrency: before reading a balance it is about to change, a transaction LOCKS that account
+# row (SELECT ... FOR UPDATE). Any other transaction that wants the same row waits until the
+# first one commits, then reads the new balance. Locks are always taken in ascending account-id
+# order, so two transactions can never each hold one lock while waiting for the other (deadlock).
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -42,6 +47,19 @@ def system_account_id(session: Session) -> int:
     return session.execute(text("SELECT id FROM accounts WHERE is_system")).scalar_one()
 
 
+def _lock_account(session: Session, account_id: int) -> Account | None:
+    """SELECT ... FOR UPDATE: read the row AND lock it until our transaction ends."""
+    # populate_existing: overwrite any stale copy SQLAlchemy cached earlier with the fresh,
+    # locked values from the database.
+    return session.get(Account, account_id, with_for_update=True, populate_existing=True)
+
+
+def _lock_accounts_in_order(session: Session, *account_ids: int) -> dict[int, Account | None]:
+    """Lock several accounts, always lowest id first. This consistent order is what prevents
+    deadlocks: A->B and B->A transfers both lock min(A, B) first, so one simply waits."""
+    return {i: _lock_account(session, i) for i in sorted(account_ids)}
+
+
 def _move_money(session: Session, src: Account, dst: Account, amount_paise: int) -> Transfer:
     """Record one transfer as double-entry. Does NOT commit: the caller decides when."""
     # Building the entries inside the Transfer lets SQLAlchemy insert the transfer first and fill
@@ -65,7 +83,9 @@ def create_account(session: Session, owner_name: str, initial_balance_paise: int
     session.add(account)
     session.flush()  # get account.id
     if initial_balance_paise > 0:
-        funding = session.get(Account, system_account_id(session))
+        # The new account is invisible to others until we commit, so only the shared system
+        # account needs a lock. (Every funded opening waits its turn on this one row.)
+        funding = _lock_account(session, system_account_id(session))
         _move_money(session, funding, account, initial_balance_paise)
     session.commit()  # the account and its funding transfer appear together, or not at all
     return account
@@ -78,8 +98,8 @@ def get_account(session: Session, account_id: int) -> Account | None:
 def transfer(session: Session, from_id: int, to_id: int, amount_paise: int) -> Transfer:
     """Move money between two customer accounts, or raise a LedgerError (nothing is written).
     Does NOT commit: the API commits once, together with the idempotency record (Phase 3)."""
-    src = session.get(Account, from_id)
-    dst = session.get(Account, to_id)
+    locked = _lock_accounts_in_order(session, from_id, to_id)
+    src, dst = locked[from_id], locked[to_id]
     if src is None or dst is None:
         raise AccountNotFound()
     if src.is_system or dst.is_system:
