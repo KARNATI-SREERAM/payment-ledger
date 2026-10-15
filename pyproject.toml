@@ -1,0 +1,19 @@
+# Tool config only (this project is not a pip-installable package).
+# ruff = linter, pytest = test runner; CI runs both.
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# Tell ruff our own modules live here, so `import ledger` is sorted as first-party.
+src = ["app", "tests"]
+
+[tool.ruff.lint]
+# E/W = style errors, F = real bugs (unused imports, undefined names), I = import order
+select = ["E", "W", "F", "I"]
+
+[tool.pytest.ini_options]
+# Lets tests do `import ledger` / `import main` without packaging the app folder.
+pythonpath = ["app"]
+testpaths = ["tests"]
+# Starlette's TestClient uses an anyio alias that newer anyio marks deprecated: library noise, not ours.
+filterwarnings = ["ignore:The anyio.abc.BlockingPortal alias is deprecated:DeprecationWarning"]

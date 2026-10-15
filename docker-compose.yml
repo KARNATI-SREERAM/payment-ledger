@@ -1,0 +1,41 @@
+# Runs the ledger locally with one command: `docker compose up --build`.
+# PostgreSQL (the ledger's source of truth) + the FastAPI service in front of it.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      # ${VAR:-default}: use the value from .env if present, otherwise the default.
+      POSTGRES_USER: ${POSTGRES_USER:-ledger}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ledger}
+      POSTGRES_DB: ${POSTGRES_DB:-ledger}
+    ports:
+      - "5434:5432"  # 5434 on your Mac, so it won't clash with Project 1 (5433) or a local 5432
+    volumes:
+      - pgdata:/var/lib/postgresql/data                  # survives `down`, wiped by `down -v`
+      - ./db/create_test_db.sql:/docker-entrypoint-initdb.d/01-test-db.sql:ro  # first start only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-ledger} -d ${POSTGRES_DB:-ledger}"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+  api:
+    build: .
+    depends_on:
+      postgres:
+        condition: service_healthy  # the API creates its tables at startup, so wait for the DB
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ledger}:${POSTGRES_PASSWORD:-ledger}@postgres:5432/${POSTGRES_DB:-ledger}
+    ports:
+      - "8001:8000"  # http://localhost:8001 (Project 1's API uses 8000)
+    healthcheck:
+      # The slim image has no curl, so use Python's standard library to call /health.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  pgdata:

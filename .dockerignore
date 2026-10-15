@@ -1,0 +1,10 @@
+# Keep the API image's build context small: only requirements.txt and app/ are copied in.
+.venv
+.git
+**/__pycache__
+.pytest_cache
+.ruff_cache
+results
+tests
+loadtest
+benchmark
