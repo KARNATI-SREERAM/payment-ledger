@@ -37,6 +37,8 @@ Every number here comes from **one run** of one command, saved in
 ```bash
 ./scripts/measure_all.sh      # ~2-3 min; deletes existing ledger data first
 ```
+The `git: 069330c` line in that file refers to the Phase 4 commit as it was before commit authors were rewritten for publishing; it is now `06674e7` (same code, only the author email changed). The uncommitted files it lists are the Phase 5 commit.
+
 
 | What | Result |
 |---|---|
