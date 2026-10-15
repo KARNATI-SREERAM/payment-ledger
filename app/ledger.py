@@ -76,7 +76,8 @@ def get_account(session: Session, account_id: int) -> Account | None:
 
 
 def transfer(session: Session, from_id: int, to_id: int, amount_paise: int) -> Transfer:
-    """Move money between two customer accounts, or raise a LedgerError (nothing is written)."""
+    """Move money between two customer accounts, or raise a LedgerError (nothing is written).
+    Does NOT commit: the API commits once, together with the idempotency record (Phase 3)."""
     src = session.get(Account, from_id)
     dst = session.get(Account, to_id)
     if src is None or dst is None:
@@ -87,7 +88,7 @@ def transfer(session: Session, from_id: int, to_id: int, amount_paise: int) -> T
     if src.balance_paise < amount_paise:
         raise InsufficientFunds()
     result = _move_money(session, src, dst, amount_paise)
-    session.commit()
+    session.flush()  # send the INSERTs/UPDATEs now so result.id is known (still uncommitted)
     return result
 
 

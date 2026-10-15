@@ -21,8 +21,9 @@ def test_invariants_hold_after_many_random_transfers(session):
         src, dst = rng.sample(ids, 2)
         try:
             ledger.transfer(session, src, dst, rng.randint(1, 20_000))
+            session.commit()  # ledger.transfer() leaves committing to its caller
         except ledger.InsufficientFunds:
-            session.rollback()
+            pass  # refused before writing anything
     assert ledger.check_invariants(session) == HEALTHY
     # Transfers between customers never change the total customer money.
     assert sum(ledger.get_account(session, i).balance_paise for i in ids) == customer_total
@@ -41,6 +42,7 @@ def test_audit_detects_a_balance_that_disagrees_with_its_entries(session):
 def test_audit_detects_a_transfer_with_a_missing_leg(session):
     a, b = ledger.create_account(session, "A", 5_000), ledger.create_account(session, "B", 0)
     t = ledger.transfer(session, a.id, b.id, 100)
+    session.commit()
     session.execute(
         text("DELETE FROM ledger_entries WHERE transfer_id = :t AND direction = 'CREDIT'"),
         {"t": t.id})

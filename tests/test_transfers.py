@@ -1,12 +1,7 @@
 # Tests for transfers and double-entry bookkeeping: money moves, both ledger legs are written,
 # failed transfers change nothing, and statements show a correct running balance.
 
-from helpers import balance, open_account
-
-
-def send(client, src, dst, paise):
-    return client.post("/transfers",
-                       json={"from_account_id": src, "to_account_id": dst, "amount_paise": paise})
+from helpers import balance, open_account, send
 
 
 def test_transfer_moves_money_and_writes_two_entries(client):

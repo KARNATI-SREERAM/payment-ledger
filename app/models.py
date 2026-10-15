@@ -11,12 +11,14 @@
 from datetime import datetime
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
+    Integer,
     String,
     false,
     func,
@@ -79,4 +81,20 @@ class LedgerEntry(Base):
     account_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("accounts.id"))
     direction: Mapped[str] = mapped_column(String(6))  # DEBIT = money out, CREDIT = money in
     amount_paise: Mapped[int] = mapped_column(BigInteger)  # always positive; direction gives sign
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+
+class IdempotencyKey(Base):
+    """One row per Idempotency-Key ever used on POST /transfers, with the response we sent.
+    A retry with the same key gets this stored response back instead of moving money again."""
+    __tablename__ = "idempotency_keys"
+
+    key: Mapped[str] = mapped_column(String(255), primary_key=True)  # PK = unique index
+    # SHA-256 of the request body: detects a client reusing a key for a DIFFERENT transfer.
+    request_hash: Mapped[str] = mapped_column(String(64))
+    # Filled in by the same transaction that claimed the key, so a committed row always has them.
+    response_status: Mapped[int | None] = mapped_column(Integer)
+    # JSON (not JSONB): Postgres keeps the text exactly as stored, so a replay is byte-identical
+    # to the original response (JSONB would re-order the keys).
+    response_body: Mapped[dict | None] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

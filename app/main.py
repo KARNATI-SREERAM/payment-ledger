@@ -5,13 +5,14 @@
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 import database
+import idempotency
 import ledger
 from schemas import (
     MAX_ID,
@@ -92,13 +93,41 @@ def transfer_json(transfer) -> dict:
 
 
 @app.post("/transfers", status_code=201)
-def create_transfer(body: TransferCreate, session: Session = Depends(get_session)):
+def create_transfer(
+    body: TransferCreate,
+    # FastAPI reads the "Idempotency-Key" HTTP header into this argument.
+    idempotency_key: Annotated[str | None, Header(min_length=1, max_length=255)] = None,
+    session: Session = Depends(get_session),
+):
+    if idempotency_key is None:
+        raise HTTPException(status_code=400, detail="Idempotency-Key header is required")
+    request_hash = idempotency.hash_request(body.model_dump())
+
+    # Steps 1-4 all run in ONE database transaction; only step 4 commits.
+    # 1. Claim the key, or find the response we already gave for it.
+    previous = idempotency.claim(session, idempotency_key, request_hash)
+    if previous is not None:
+        if previous.request_hash != request_hash:
+            # Same key, different transfer: almost certainly a client bug. Refuse loudly.
+            raise HTTPException(status_code=422,
+                                detail="Idempotency-Key was already used for a different request")
+        return JSONResponse(previous.response_body, status_code=previous.response_status,
+                            headers={"Idempotent-Replayed": "true"})
+
+    # 2. Do the transfer (not committed yet).
     try:
         t = ledger.transfer(session, body.from_account_id, body.to_account_id, body.amount_paise)
+        status, payload = 201, transfer_json(t)
     except ledger.LedgerError as e:
+        # A refused transfer is ALSO a final answer for this key: a retry gets the same refusal,
+        # even if the balance has changed since. (Nothing was written, so no rollback needed.)
         status, message = LEDGER_ERRORS[type(e)]
-        raise HTTPException(status_code=status, detail=message)
-    return transfer_json(t)
+        payload = {"detail": message}
+
+    # 3. Remember the response under the key.  4. Commit everything together.
+    idempotency.save_response(session, idempotency_key, status, payload)
+    session.commit()
+    return JSONResponse(payload, status_code=status)
 
 
 @app.get("/transfers/{transfer_id}")
