@@ -5,7 +5,7 @@
 from contextlib import asynccontextmanager
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, HTTPException, Path, Request
+from fastapi import Depends, FastAPI, HTTPException, Path, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from sqlalchemy.exc import OperationalError
@@ -13,7 +13,14 @@ from sqlalchemy.orm import Session
 
 import database
 import ledger
-from schemas import AccountCreate, AccountOut
+from schemas import (
+    MAX_ID,
+    AccountCreate,
+    AccountOut,
+    StatementOut,
+    TransferCreate,
+    TransferOut,
+)
 
 
 @asynccontextmanager
@@ -26,7 +33,15 @@ app = FastAPI(title="Payment ledger", lifespan=lifespan)
 
 # Ids are Postgres BIGINTs. Without these bounds, /accounts/99999999999999999999 would reach the
 # database, fail there and come back as a 500 error instead of a clean 422.
-AccountId = Annotated[int, Path(ge=1, le=2**63 - 1)]
+AccountId = Annotated[int, Path(ge=1, le=MAX_ID)]
+TransferId = Annotated[int, Path(ge=1, le=MAX_ID)]
+
+# Business-rule failures from ledger.py -> HTTP status + message. 422 = "understood, but refused".
+LEDGER_ERRORS = {
+    ledger.AccountNotFound: (404, "account not found"),
+    ledger.InsufficientFunds: (422, "insufficient funds"),
+    ledger.SystemAccountNotAllowed: (422, "the system account cannot be used in transfers"),
+}
 
 
 @app.exception_handler(OperationalError)  # DB down, connection lost, or pool timeout
@@ -59,3 +74,36 @@ def get_account(account_id: AccountId, session: Session = Depends(get_session)):
     if account is None:
         raise HTTPException(status_code=404, detail="account not found")
     return account
+
+
+@app.get("/accounts/{account_id}/statement", response_model=StatementOut)
+def get_statement(account_id: AccountId, limit: int = Query(50, ge=1, le=500),
+                  session: Session = Depends(get_session)):
+    account = ledger.get_account(session, account_id)
+    if account is None:
+        raise HTTPException(status_code=404, detail="account not found")
+    return {"account_id": account.id, "balance_paise": account.balance_paise,
+            "entries": ledger.statement(session, account_id, limit)}
+
+
+def transfer_json(transfer) -> dict:
+    # mode="json": datetimes become strings, so the result can also be stored as JSON (Phase 3).
+    return TransferOut.model_validate(transfer).model_dump(mode="json")
+
+
+@app.post("/transfers", status_code=201)
+def create_transfer(body: TransferCreate, session: Session = Depends(get_session)):
+    try:
+        t = ledger.transfer(session, body.from_account_id, body.to_account_id, body.amount_paise)
+    except ledger.LedgerError as e:
+        status, message = LEDGER_ERRORS[type(e)]
+        raise HTTPException(status_code=status, detail=message)
+    return transfer_json(t)
+
+
+@app.get("/transfers/{transfer_id}")
+def get_transfer(transfer_id: TransferId, session: Session = Depends(get_session)):
+    found = ledger.get_transfer(session, transfer_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="transfer not found")
+    return transfer_json(found)

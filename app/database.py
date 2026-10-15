@@ -8,6 +8,7 @@ import os
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+import ledger
 import models
 
 # "postgresql+psycopg" = PostgreSQL dialect, using the psycopg 3 driver underneath.
@@ -32,5 +33,7 @@ SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
 def init_db() -> None:
-    """Create any missing tables. Safe to run on every startup (existing tables are left alone)."""
-    models.Base.metadata.create_all(engine)
+    """Create any missing tables and the system account. Safe to run on every startup."""
+    models.Base.metadata.create_all(engine)  # existing tables are left alone
+    with SessionLocal() as session:
+        ledger.seed_system_account(session)

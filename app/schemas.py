@@ -3,9 +3,10 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 MAX_PAISE = 10**12  # ₹1,000 crore: a sanity cap so absurd numbers are rejected at the door
+MAX_ID = 2**63 - 1  # largest Postgres BIGINT
 
 
 class AccountCreate(BaseModel):
@@ -22,4 +23,51 @@ class AccountOut(BaseModel):
     id: int
     owner_name: str
     balance_paise: int
+    is_system: bool
     created_at: datetime
+
+
+class TransferCreate(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid")
+    from_account_id: int = Field(ge=1, le=MAX_ID)
+    to_account_id: int = Field(ge=1, le=MAX_ID)
+    amount_paise: int = Field(gt=0, le=MAX_PAISE)
+
+    @model_validator(mode="after")
+    def different_accounts(self):
+        if self.from_account_id == self.to_account_id:
+            raise ValueError("from_account_id and to_account_id must be different")
+        return self
+
+
+class EntryOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    account_id: int
+    direction: str
+    amount_paise: int
+
+
+class TransferOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+    id: int
+    from_account_id: int
+    to_account_id: int
+    amount_paise: int
+    created_at: datetime
+    entries: list[EntryOut]  # the two double-entry legs of this transfer
+
+
+class StatementLine(BaseModel):
+    entry_id: int
+    transfer_id: int
+    direction: str
+    amount_paise: int
+    counterparty_account_id: int
+    balance_after_paise: int
+    created_at: datetime
+
+
+class StatementOut(BaseModel):
+    account_id: int
+    balance_paise: int
+    entries: list[StatementLine]  # newest first
