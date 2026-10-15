@@ -2,6 +2,8 @@
 # database session, calls the business logic in ledger.py, and turns the result into JSON.
 # Run locally: uvicorn main:app --app-dir app   (in compose: the `api` service, localhost:8001)
 
+import math
+import os
 from contextlib import asynccontextmanager
 from typing import Annotated
 
@@ -14,6 +16,7 @@ from sqlalchemy.orm import Session
 import database
 import idempotency
 import ledger
+from ratelimit import RateLimiter
 from schemas import (
     MAX_ID,
     AccountCreate,
@@ -43,6 +46,27 @@ LEDGER_ERRORS = {
     ledger.InsufficientFunds: (422, "insufficient funds"),
     ledger.SystemAccountNotAllowed: (422, "the system account cannot be used in transfers"),
 }
+
+
+# Per-client limits. Defaults allow a 100-request burst, then 50 requests/s on average.
+limiter = RateLimiter(rate_per_sec=float(os.getenv("RATE_LIMIT_PER_SEC", "50")),
+                      burst=int(os.getenv("RATE_LIMIT_BURST", "100")))
+NOT_LIMITED = {"/health", "/docs", "/openapi.json"}  # health checks must never be throttled
+
+
+@app.middleware("http")
+async def rate_limit(request: Request, call_next):
+    # Runs before every route. It is async, so it runs on the single event-loop thread, one request
+    # at a time: the limiter's dict needs no lock. (The sync routes run in a thread pool after it.)
+    if request.url.path not in NOT_LIMITED:
+        # Who is "a client"? The X-Client-Id header, else the caller's IP address. A real system
+        # would use the authenticated API key instead, because a header can be faked.
+        client_id = request.headers.get("X-Client-Id") or request.client.host
+        allowed, retry_after = limiter.allow(client_id)
+        if not allowed:
+            return JSONResponse(status_code=429, content={"detail": "rate limit exceeded"},
+                                headers={"Retry-After": str(math.ceil(retry_after))})
+    return await call_next(request)
 
 
 @app.exception_handler(OperationalError)  # DB down, connection lost, or pool timeout

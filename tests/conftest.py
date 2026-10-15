@@ -11,6 +11,9 @@ TEST_URL = os.getenv(
     "TEST_DATABASE_URL", "postgresql+psycopg://ledger:ledger@localhost:5434/ledger_test")
 os.environ["DATABASE_URL"] = TEST_URL
 os.environ.setdefault("DB_POOL_SIZE", "30")  # enough connections for the concurrency tests
+# The suite fires hundreds of requests from one test client; only test_ratelimit.py tests limits.
+os.environ["RATE_LIMIT_PER_SEC"] = "1000000"
+os.environ["RATE_LIMIT_BURST"] = "1000000"
 
 import pytest  # noqa: E402  (imports below must come after the environment is set)
 from fastapi.testclient import TestClient  # noqa: E402

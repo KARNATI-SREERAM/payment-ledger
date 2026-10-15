@@ -1,0 +1,95 @@
+== 0. Environment
+date: 2026-10-15T16:34:29Z  git: 069330c (plus uncommitted changes)
+uncommitted: .env.example app/main.py docker-compose.yml tests/conftest.py .github/ app/ratelimit.py benchmark/ loadtest/ results/ scripts/ tests/test_ratelimit.py
+machine: Apple M4, 16 GB RAM, macOS 26.3
+docker: 29.8.2, 10 CPUs, 7.7 GiB available to containers
+== 1. Clean start (fresh Postgres volume)
+containers: api=running postgres=running
+api config: 1 uvicorn worker, DB pool 10+5, rate limit per client: 50 req/s, burst 100
+== 2. Lint and full test suite (real Postgres, ledger_test database)
+All checks passed!
+44 passed in 3.26s
+concurrency tests:
+tests/test_concurrency.py::test_100_parallel_transfers_between_the_same_two_accounts PASSED
+tests/test_concurrency.py::test_opposite_directions_do_not_deadlock PASSED
+tests/test_concurrency.py::test_overdraft_race_lets_exactly_the_affordable_transfers_through PASSED
+tests/test_concurrency.py::test_same_idempotency_key_sent_20_times_at_once_moves_money_once PASSED
+tests/test_concurrency.py::test_total_money_never_changes_under_concurrent_random_transfers PASSED
+tests/test_concurrency.py::test_parallel_account_openings_are_all_funded_correctly PASSED
+tests/test_concurrency.py::test_unique_keys_in_parallel_are_all_distinct_transfers PASSED
+== 3. HTTP drills against the running API
+-- 1. Sequential latency: 1000 POST /transfers from one client (after 50 warm-up)
+latency ms: p50=3.45 p95=8.62 p99=19.05 mean=4.25 max=50.37  errors=0
+-- 2a. 100 parallel transfers A->B of ₹1 each (A starts with ₹1,000)
+wall time for all 100: 338 ms
+PASS  responses 201: 100 (expected 100)
+PASS  balances [A, B] in paise: [90000, 10000] (expected [90000, 10000])
+-- 2b. 50 A->B + 50 B->A at the same time (deadlock bait)
+PASS  responses 201: 100 (expected 100)
+PASS  balances unchanged: [100000, 100000] (expected [100000, 100000])
+-- 2c. Overdraft race: A can afford 50 of 100 parallel transfers
+PASS  responses 201: 50 (expected 50)
+PASS  responses 422 insufficient funds: 50 (expected 50)
+PASS  final balance of A: 0 (expected 0)
+-- 2d. Same Idempotency-Key sent 20 times in parallel
+PASS  responses 201: 20 (expected 20)
+PASS  distinct response bodies: 1 (expected 1)
+PASS  requests that did the work (not replayed): 1 (expected 1)
+PASS  balance of A (moved once): 9000 (expected 9000)
+-- 3. Rate limit: one client sends 300 GET /accounts/1 back-to-back
+in 1.58 s: 200=178 429=122 other=0  Retry-After values=['1']
+first 429 at request #138; token bucket allows at most burst + rate x time = 100 + 50 x 1.58 = 179
+PASS  a different client is not affected: 200 (expected 200)
+== 4. Load test: locust, 50 users x 10 req/s each, 60s
+total_balance_paise=0 accounts_mismatched=0 transfers_unbalanced=0 customer_accounts=10 customer_transfers=1301 ledger_entries=2614 idempotency_keys=1351 min_customer_balance_paise=0
+PASS  ledger invariants hold
+ Container project2-payment-ledger-postgres-1 Running 
+ Container project2-payment-ledger-api-1 Running 
+ Container project2-payment-ledger-postgres-1 Waiting 
+ Container project2-payment-ledger-postgres-1 Healthy 
+ Container project2-payment-ledger-api-1 Waiting 
+ Container project2-payment-ledger-api-1 Healthy 
+ Container project2-payment-ledger-locust-run-fa051965043a Creating 
+ Container project2-payment-ledger-locust-run-fa051965043a Created 
+client-side transfer outcomes: new_201=16118 new_422_insufficient=0 retries_replayed=1983
+Type     Name                                                                          # reqs      # fails |    Avg     Min     Max    Med |   req/s  failures/s
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+GET      GET /accounts/{id}                                                              4014     0(0.00%) |     91      13     410     88 |   66.96        0.00
+GET      GET /accounts/{id}/statement                                                    2044     0(0.00%) |     95      16     443     92 |   34.10        0.00
+POST     POST /transfers (new)                                                          16118     0(0.00%) |    118      24     567    110 |  268.88        0.00
+POST     POST /transfers (retry)                                                         1983     0(0.00%) |     90      14     370     88 |   33.08        0.00
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+         Aggregated                                                                     24159     0(0.00%) |    109      13     567    110 |  403.01        0.00
+
+Response time percentiles (approximated)
+Type     Name                                                                                  50%    66%    75%    80%    90%    95%    98%    99%  99.9% 99.99%   100% # reqs
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+GET      GET /accounts/{id}                                                                     88     96    100    110    150    160    210    250    390    410    410   4014
+GET      GET /accounts/{id}/statement                                                           92    100    110    120    150    170    210    250    370    440    440   2044
+POST     POST /transfers (new)                                                                 110    120    130    140    180    200    240    280    400    540    570  16118
+POST     POST /transfers (retry)                                                                88     96    100    110    150    160    200    230    330    370    370   1983
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+         Aggregated                                                                            110    120    130    140    170    190    240    270    390    530    570  24159
+
+container CPU/memory 35 s into the load test (cpu 100% = one full core):
+locust-run-fa051965043a cpu=16.24% mem=40.34MiB / 7.748GiB
+api-1 cpu=141.00% mem=68.35MiB / 7.748GiB
+postgres-1 cpu=24.44% mem=80.37MiB / 7.748GiB
+ledger audit after the load test:
+total_balance_paise=0 accounts_mismatched=0 transfers_unbalanced=0 customer_accounts=110 customer_transfers=17419 ledger_entries=35050 idempotency_keys=17469 min_customer_balance_paise=0
+PASS  ledger invariants hold
+PASS  new transfers in DB == transfers locust saw succeed (201): 16118 = 16118
+PASS  new idempotency keys == new transfer requests (201 + 422): 16118 = 16118
+== 5. Failure drill: SIGKILL Postgres in the middle of 300 transfers
+transfers requested=300 attempts=313 failed_attempts=12 by_type={503: 12} replayed_responses=0 rate_limited_429=1
+Postgres SIGKILLed at t=0.34 s, restarted at t=2.68 s; first failed request t=0.41 s; first success after it t=3.01 s (client-visible outage 2.60 s); total 4.71 s
+PASS  transfers recorded from A: 300 (expected 300)
+PASS  balance of A in paise: 970000 (expected 970000)
+PASS  balance of B in paise: 30000 (expected 30000)
+ledger audit after the crash:
+total_balance_paise=0 accounts_mismatched=0 transfers_unbalanced=0 customer_accounts=112 customer_transfers=17719 ledger_entries=35652 idempotency_keys=17769 min_customer_balance_paise=0
+PASS  ledger invariants hold
+== 6. Memory (long-running containers, after all of the above)
+api-1 69.08MiB / 7.748GiB
+postgres-1 63.36MiB / 7.748GiB
+== Done (stack stopped, data volume kept). Output saved to results/measured_run.txt

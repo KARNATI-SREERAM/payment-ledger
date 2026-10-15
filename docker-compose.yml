@@ -1,5 +1,6 @@
 # Runs the ledger locally with one command: `docker compose up --build`.
 # PostgreSQL (the ledger's source of truth) + the FastAPI service in front of it.
+# The locust load tester is only started on request: docker compose --profile loadtest run --rm locust
 
 services:
   postgres:
@@ -27,6 +28,8 @@ services:
         condition: service_healthy  # the API creates its tables at startup, so wait for the DB
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-ledger}:${POSTGRES_PASSWORD:-ledger}@postgres:5432/${POSTGRES_DB:-ledger}
+      RATE_LIMIT_PER_SEC: ${RATE_LIMIT_PER_SEC:-50}  # per client, long-run average
+      RATE_LIMIT_BURST: ${RATE_LIMIT_BURST:-100}     # per client, short burst allowance
     ports:
       - "8001:8000"  # http://localhost:8001 (Project 1's API uses 8000)
     healthcheck:
@@ -36,6 +39,23 @@ services:
       timeout: 5s
       retries: 20
     restart: unless-stopped
+
+  locust:
+    image: locustio/locust:2.32.4
+    profiles: ["loadtest"]  # not started by a plain `docker compose up`
+    depends_on:
+      api:
+        condition: service_healthy
+    volumes:
+      - ./loadtest:/mnt/loadtest:ro
+      - ./results:/mnt/results       # CSV results land in ./results on your Mac
+    # Headless run: 50 users (25 started per second) for 60 s, against the api container.
+    # --stop-timeout: at the end, let in-flight requests finish instead of killing them, so every
+    # transfer the server commits is also counted by the client.
+    command: >-
+      -f /mnt/loadtest/locustfile.py --headless --host http://api:8000
+      --users ${LOCUST_USERS:-50} --spawn-rate 25 --run-time ${LOCUST_RUN_TIME:-60s}
+      --stop-timeout 10s --csv /mnt/results/locust --only-summary
 
 volumes:
   pgdata:
