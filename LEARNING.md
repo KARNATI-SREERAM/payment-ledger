@@ -25,7 +25,7 @@ Contents:
 sequenceDiagram
     participant C as Client
     participant M as rate_limit middleware
-    participant R as POST /transfers (main.py)
+    participant R as POST /transfers (main.py → idempotency.process_transfer)
     participant I as idempotency.py
     participant L as ledger.py
     participant DB as PostgreSQL
@@ -51,25 +51,25 @@ sequenceDiagram
 
 **Walk-through: Asha (account 2) sends ₹120 to Ravi (account 3) with `Idempotency-Key: order-1001`.**
 
-1. **Rate limit**: [main.py:57](app/main.py#L57). The middleware looks up the token bucket for this client
+1. **Rate limit**: [main.py:54](app/main.py#L54). The middleware looks up the token bucket for this client
    (the `X-Client-Id` header, or else the IP) and spends one token. With no token left, it returns 429 + `Retry-After`.
    The bucket logic is in [ratelimit.py:21](app/ratelimit.py#L21).
 2. **Validation**: [schemas.py](app/schemas.py) `TransferCreate`. `strict=True` rejects `"12000"` and `120.5`.
-   The amount must be > 0, the two accounts must differ, and unknown fields are refused. A missing key header gives 400 ([main.py:119](app/main.py#L119)).
+   The amount must be > 0, the two accounts must differ, and unknown fields are refused. A missing key header gives 400 ([main.py:111](app/main.py#L111)).
 3. **Open a session**: `get_session()` borrows one connection from the pool ([database.py](app/database.py)).
    psycopg starts a transaction at the first statement. Nothing is visible to anyone else until COMMIT.
-4. **Claim the key**: [idempotency.py:25](app/idempotency.py#L25). `INSERT INTO idempotency_keys ... ON CONFLICT (key) DO NOTHING RETURNING key`.
+4. **Claim the key**: [idempotency.py:27](app/idempotency.py#L27). `INSERT INTO idempotency_keys ... ON CONFLICT (key) DO NOTHING RETURNING key`.
    - A row comes back: this request owns the key.
    - Nothing comes back: the key was used before. We read the stored row and replay it. A different body hash gives 422.
    - If another request with the same key is *in flight*, this INSERT waits on the primary-key index until that request commits.
 5. **Lock the accounts**: [ledger.py:57](app/ledger.py#L57). `SELECT ... FOR UPDATE` on account 2, then account 3 (ascending id).
    Any other transfer touching account 2 now waits at its own `FOR UPDATE` until we commit.
-6. **Business checks**: [ledger.py:98](app/ledger.py#L98). Both accounts exist (else 404), neither is the system account, and the
+6. **Business checks**: [ledger.py:104](app/ledger.py#L104). Both accounts exist (else 404), neither is the system account, and the
    balance is at least ₹120 (else 422). These are raised *before* any write, so the stored refusal is the only write.
 7. **Double-entry write**: [ledger.py:63](app/ledger.py#L63). INSERT one `transfers` row and two `ledger_entries`
    (DEBIT 12000 on account 2, CREDIT 12000 on account 3), and UPDATE both cached balances.
-8. **Store the response**: [idempotency.py:45](app/idempotency.py#L45), the exact JSON we are about to send, status 201.
-9. **COMMIT**: [main.py:153](app/main.py#L153). Steps 4–8 become visible together, and the row locks are released.
+8. **Store the response**: [idempotency.py:47](app/idempotency.py#L47), the exact JSON we are about to send, status 201.
+9. **COMMIT**: [idempotency.py:90](app/idempotency.py#L90). Steps 4–8 become visible together, and the row locks are released.
    If the process or DB dies before this line, Postgres discards everything, *including the key claim*. The client's
    retry then runs as a first attempt.
 10. **Retry**: the same request is sent again (say the response was lost). Step 4 finds the committed row and returns the
@@ -79,11 +79,13 @@ sequenceDiagram
 
 | File | Purpose | Key concept |
 |---|---|---|
-| `app/main.py` | HTTP routes, rate-limit middleware, error → status mapping, the one `commit()` per transfer | Transaction boundary at the request; 503 for DB outages; 4xx for business refusals |
+| `app/main.py` | JSON routes, rate-limit middleware, 503 for DB outages; mounts the web pages | Thin HTTP layer; 503 for DB outages; 4xx for business refusals |
+| `app/web.py` | HTML pages: home (ledger health + accounts), account statement, send-money form, transfer page | Server-side rendering, POST + Post/Redirect/Get, idempotency keys in forms, `Decimal` for money input |
+| `app/templates/*.html` | `base.html` layout + `home`, `account`, `send`, `transfer` pages | Template inheritance, autoescaping (XSS) |
 | `app/ledger.py` | Accounts, transfers, statement, audit; row locking | Double-entry, `SELECT ... FOR UPDATE`, lock ordering, window functions, invariants |
-| `app/idempotency.py` | Claim a key, replay a stored response | Idempotency, a unique index as a concurrency control |
+| `app/idempotency.py` | Claim a key, replay a stored response; `process_transfer()`, the one path money takes (API and web), with the one `commit()` per transfer | Idempotency, a unique index as a concurrency control, transaction boundary |
 | `app/models.py` | Tables as SQLAlchemy classes, with CHECK constraints | Integer money, constraints as the last line of defence, partial unique index |
-| `app/database.py` | Engine (connection pool), session factory, `init_db()` | Connection pooling, `pool_pre_ping` for recovery after a DB restart |
+| `app/database.py` | Engine (connection pool), session factory, `get_session()`, `init_db()` | Connection pooling, `pool_pre_ping` for recovery after a DB restart |
 | `app/schemas.py` | Pydantic request and response shapes | Validation at the edge (strict types, `extra="forbid"`) |
 | `app/ratelimit.py` | Token bucket per client | Rate limiting, lazy refill, injectable clock for tests |
 | `tests/conftest.py` | Real-Postgres fixtures; tables truncated before each test | Testing against the real database; skip locally / fail in CI |
@@ -93,6 +95,7 @@ sequenceDiagram
 | `tests/test_concurrency.py` | 100 parallel transfers, opposite directions, overdraft race, same key ×20 | Race conditions, locking, deadlock avoidance |
 | `tests/test_invariants.py` | Audit holds after random transfers and catches tampering | Invariants, testing the tester |
 | `tests/test_ratelimit.py` | Token bucket with a fake clock, 429 over HTTP | Deterministic time in tests |
+| `tests/test_web.py` | Pages render; form transfer writes DEBIT+CREDIT; same form twice moves money once; overdraft; bad amounts; escaping | Testing HTML; idempotency through a browser form |
 | `tests/helpers.py` | `open_account`, `balance`, `send` | — |
 | `loadtest/locustfile.py` | 50 users: new transfers, retries, reads | Load testing; client-side vs server-side counts |
 | `benchmark/http_drills.py` | Latency, parallel HTTP drills, rate-limit burst | End-to-end proof through the real server |
@@ -108,7 +111,7 @@ sequenceDiagram
 ### ACID
 A database transaction is **A**tomic, **C**onsistent, **I**solated and **D**urable.
 - **Atomic.** In this code, one transfer = claim key + 1 transfer row + 2 entries + 2 balance updates + stored response, with
-  one `commit()` ([main.py:153](app/main.py#L153)). All of it happens, or none of it does. The failure drill SIGKILLed Postgres mid-stream
+  one `commit()` ([idempotency.py:90](app/idempotency.py#L90)). All of it happens, or none of it does. The failure drill SIGKILLed Postgres mid-stream
   and found 300/300 transfers recorded exactly once, with no half-transfers (`transfers_unbalanced=0`).
 - **Consistent.** Constraints hold after every commit. `CHECK (balance_paise >= 0 OR is_system)`, `amount_paise > 0`,
   and `from <> to` are in [models.py](app/models.py). If code tries to break one, the whole transaction fails.
@@ -150,7 +153,7 @@ With it, the recorded run's 50 A→B + 50 B→A all succeeded.
 An operation is idempotent if doing it twice has the same effect as doing it once. Networks lose responses. The client cannot
 tell "never arrived" from "done, but the reply was lost", so it must retry, and the server must make retries harmless.
 - The client generates a unique key per *intended* payment and reuses it on every retry of that payment.
-- The server claims the key in the **same** transaction as the money movement ([idempotency.py:25](app/idempotency.py#L25)).
+- The server claims the key in the **same** transaction as the money movement ([idempotency.py:27](app/idempotency.py#L27)).
   If they were separate, a crash between them would either lose the key (a later retry pays again) or lose the payment (the retry says "done" but nothing moved).
 - The request body hash catches a client bug: one key reused for a different payment returns 422.
 - Refusals are stored too. A retried "insufficient funds" stays refused, even if the money arrives later.
@@ -162,7 +165,7 @@ Each transfer writes two equal and opposite entries ([ledger.py:63](app/ledger.p
 2. Each balance equals that account's credits − debits, so the `balance_paise` column is a *cache* that can be verified.
 3. Every transfer has exactly one DEBIT and one CREDIT.
 
-`check_invariants()` ([ledger.py:171](app/ledger.py#L171)) checks all three. After the load test and the crash drill, all three were 0.
+`check_invariants()` ([ledger.py:177](app/ledger.py#L177)) checks all three. After the load test and the crash drill, all three were 0.
 Why not just update a balance column? You would lose the history (no statement, no audit trail, no way to rebuild a balance),
 and a bug that changes a balance would be invisible. Here, `test_audit_detects_a_balance_that_disagrees_with_its_entries` shows the audit catching exactly that.
 
@@ -179,11 +182,20 @@ on each request we add `elapsed × rate` tokens. So the limiter needs no timer, 
 It returns 429 with `Retry-After`. In the recorded run, one client got 178 of 300 requests through in 1.58 s, which is within the bound
 burst + rate × time = 179. A second client was unaffected.
 
+### The web front end (Phase 6)
+- **Server-side rendering.** [web.py](app/web.py) builds whole HTML pages from Jinja2 templates; the browser just displays them. No JavaScript, no second toolchain, no extra container.
+- **One path for money.** The form handler calls `idempotency.process_transfer()`, the *same* function as `POST /transfers`. Locking, double-entry and idempotency can't differ between the API and the website.
+- **POST + Post/Redirect/Get.** Forms that change data use POST. On success the server answers **303 See Other** with a page that only reads (the transfer or account page). Pressing refresh re-GETs that page instead of re-sending the payment.
+- **Idempotency keys in a form.** Each rendered send-money form carries a hidden `idempotency_key` (a fresh UUID). A double click or a browser "resubmit" sends the same key, so the second submit is replayed (`?replayed=1`) and moves nothing. After a refusal the form gets a **new** key, because the old key's final answer is that refusal.
+- **Money input with `Decimal`.** `parse_rupees("0.29")` → 29 paise exactly; `int(float("0.29") * 100)` gives 28. More than 2 decimal places is refused, not rounded. Range checks stay in the Pydantic schemas, so the form and the API share the rules.
+- **Autoescaping.** Every `{{ }}` is HTML-escaped, so an owner name like `<script>` is shown as text (`test_owner_name_is_escaped`).
+- **A real bug the pages found.** Postgres `SUM()` over BIGINT returns NUMERIC, so the statement's running balance is a Python `Decimal`. The JSON schema silently converted it to `int`; the template filter crashed until `rupees()` did `int(paise)`.
+
 ### Connection pooling and failure handling
 One engine per process keeps up to 10 + 5 connections ([database.py](app/database.py)). `pool_timeout=5` turns "no free
 connection" into an error instead of an endless wait. `pool_pre_ping=True` tests a connection before use, so after Postgres
 restarts the API reconnects by itself. The crash drill's client-visible outage was 2.60 s, from first failure to first success. Any
-`OperationalError` (DB down, deadlock, pool timeout) becomes **503** ([main.py:72](app/main.py#L72)): "retry later", which is
+`OperationalError` (DB down, deadlock, pool timeout) becomes **503** ([main.py:68](app/main.py#L68)): "retry later", which is
 safe because of idempotency.
 
 ## 4. Ten "break it to learn it" exercises
@@ -195,13 +207,21 @@ Run `docker compose up -d postgres` first. Undo each change afterwards (`git che
 | 1 | In `_lock_account` ([ledger.py:54](app/ledger.py#L54)), drop `with_for_update=True` | `pytest tests/test_concurrency.py`: balances wrong, overdraft race lets too many through, money total changes | Lost updates: two transactions read the same old balance |
 | 2 | Remove `sorted()` in `_lock_accounts_in_order` | `test_opposite_directions_do_not_deadlock` fails with `DeadlockDetected` | A→B and B→A lock in opposite orders: a cycle |
 | 3 | Comment out the CREDIT `LedgerEntry` in `_move_money` | `test_invariants.py` reports `transfers_unbalanced` and `accounts_mismatched` | Balances no longer match their entries; the audit catches it |
-| 4 | In `create_transfer`, `session.commit()` right after `idempotency.claim(...)`, then `raise RuntimeError` after the transfer | The retry hits a key with `response_status = NULL` and crashes | Key and payment are no longer atomic: the key is stuck forever |
+| 4 | In `process_transfer` (idempotency.py), `session.commit()` right after `idempotency.claim(...)`, then `raise RuntimeError` after the transfer | The retry hits a key with `response_status = NULL` and crashes | Key and payment are no longer atomic: the key is stuck forever |
 | 5 | Remove the `request_hash` comparison | Reusing a key with a different amount returns "201" for a transfer that never happened | The client is told a lie |
 | 6 | Change the CHECK constraint to `balance_paise >= 0 OR true` *and* remove the `InsufficientFunds` check | Overdraft race drives A negative | With both defences gone nothing stops it. Constraints are the last line of defence |
 | 7 | Change `response_body` to `JSONB` | `r.content == first.content` fails but `r.json() == first.json()` passes | JSONB re-orders keys; JSON keeps the text |
 | 8 | Set `pool_pre_ping=False`, run the stack, `docker compose restart postgres`, call the API | The first request(s) after the restart fail | Pooled connections are dead; nothing checks them before use |
 | 9 | Remove `--stop-timeout 10s` from the locust command in compose and run `./scripts/measure_all.sh` | The "DB transfers == locust 201s" check fails (the DB has more) | Users are killed mid-request: the server committed, the client never saw it. This is why clients retry with keys |
 | 10 | Set `RATE_LIMIT_PER_SEC=5` in `.env` and rerun the load test | Many 429s show up as locust failures | Each locust user sends 10/s, above the per-client limit |
+
+### Bonus exercises: the web front end (Phase 6)
+
+| # | Change this | What goes wrong | Why |
+|---|---|---|---|
+| 11 | In `render_send` ([web.py](app/web.py)), reuse the submitted key instead of `new_key()` after a refusal | Overdraft refused, top up the account, fix nothing, resubmit: still "insufficient funds" (replayed). Change the amount: "Idempotency-Key was already used for a different request" | A key's first answer is final. A corrected request is a *new* request and needs a new key |
+| 12 | In `parse_rupees`, use `int(float(text) * 100)` | `test_parse_rupees_is_exact` fails: ₹0.29 becomes 28 paise | Binary floats can't store 0.29 exactly; `int()` truncates 28.999… down |
+| 13 | In `open_account`, return `render_home(...)` (200) instead of the 303 redirect, then press refresh in the browser | The browser asks to resend the form, and a second account is opened | Without Post/Redirect/Get, the last request in history is the POST, so refresh repeats it |
 
 ## 5. 25 interview questions, with model answers from this code
 
@@ -323,8 +343,25 @@ Python request handling in one uvicorn worker is the limit, not the database or 
 It is a hot row. Every funded account opening locks it, so openings are serialized. At scale you'd split it into several funding
 sub-accounts, or batch openings.
 
+### Bonus questions: the web front end (Phase 6)
+
+**26. How does your web form avoid paying twice on a double click?**
+The server puts a fresh UUID into a hidden `idempotency_key` field each time it renders the form. Both submits carry the same key, so
+`process_transfer()` claims it once and replays the stored result the second time: the page shows "Replayed… no money moved again".
+`test_submitting_the_same_form_twice_moves_money_once` proves it.
+
+**27. Why redirect with 303 after a successful POST?**
+Post/Redirect/Get: the browser's last request becomes a harmless GET of the transfer page, so refresh and back don't resend the payment.
+303 specifically tells the browser to follow with GET (307 would repeat the POST).
+
+**28. Why did you build HTML on the server instead of a React app?**
+Five simple pages don't justify a second language, a build step and a CORS setup. The server-rendered pages call the same Python
+functions as the JSON API, so the rules can't drift apart. A richer UI could later be a JS app that calls the existing JSON API.
+
 ## 6. Limitations and next steps
 
+- **No CSRF protection on the web forms.** With no login there's no session to hijack, but once you add cookies-based auth, every POST form needs a CSRF token (or `SameSite` cookies).
+- **Opening an account from the form isn't idempotent.** Post/Redirect/Get stops a refresh from repeating it, but a fast double click can open two accounts. The same hidden-key pattern as transfers would fix it.
 - **No authentication.** `X-Client-Id` is trusted, so a client can dodge its rate limit by changing the header. Idempotency keys are global,
   not scoped per client. In production, derive both from an authenticated API key.
 - **The rate limiter is in-memory, single process.** It resets on restart and isn't shared across workers. The bucket dict also grows by one entry
@@ -468,7 +505,7 @@ subtract. That is a *race condition* (a lost update, or a negative balance stopp
 - *JSON vs JSONB.* JSONB re-orders keys. Plain JSON keeps the exact text, so replays are byte-identical.
 
 **Break it to learn it**
-1. In `create_transfer`, add `session.commit()` right after `idempotency.claim(...)`. Then add
+1. In `process_transfer` (`create_transfer` in main.py before Phase 6), add `session.commit()` right after `idempotency.claim(...)`. Then add
    `raise RuntimeError` right after the transfer. Call the API, and retry with the same key. The key now
    exists with no response (`response_status` is NULL), and the retry crashes. A crash in that gap
    leaves the key stuck forever.
@@ -540,3 +577,19 @@ I also removed the `sorted()` as an experiment: the opposite-direction test then
 **Key concepts**: token bucket; load testing vs latency testing (queueing); reconciliation (server vs client counts); finding the bottleneck with `docker stats`.
 
 **Break it to learn it**: exercises 8, 9 and 10 in §4.
+
+### Phase 6: Web front end (server-rendered, Jinja2)
+
+**What was built**
+- `app/web.py` + `app/templates/`: home (live ledger health + accounts + open-account form), account statement, send-money form, transfer page with its DEBIT and CREDIT. No JavaScript; served by the same FastAPI app at http://localhost:8001/.
+- Refactor with no behaviour change (the 44 existing tests still pass): `process_transfer()` moved into `idempotency.py` so the JSON API and the form share one path for money; `get_session()` moved into `database.py` and `transfer_json()` into `schemas.py`, so `web.py` doesn't import `main.py` (no circular import).
+- `ledger.list_accounts()`; dependencies `jinja2` and `python-multipart` (FastAPI needs it to read POSTed forms).
+- `tests/test_web.py`: 13 tests (57 in total).
+
+**What I learned while building it**
+- Postgres `SUM()` over BIGINT returns NUMERIC, so the running balance is a `Decimal` in Python. The JSON schema hid this by converting to `int`; the template filter crashed on it until it did `int(paise)` itself.
+- After a refused transfer, the form must get a **new** idempotency key: the old key's stored answer (the refusal) is final.
+
+**Key concepts**: server-side rendering; POST vs GET; Post/Redirect/Get with 303; idempotency keys in HTML forms; `Decimal` for money input; autoescaping (XSS).
+
+**Break it to learn it**: exercises 11, 12 and 13 in §4.

@@ -1,0 +1,34 @@
+{# One account (GET /ui/accounts/{id}): its balance and statement. The statement rows come from
+   ledger.statement(), the same query as GET /accounts/{id}/statement, newest first, with the
+   running balance after each entry. #}
+{% extends "base.html" %}
+{% block title %}Account #{{ account.id }}{% endblock %}
+
+{% block content %}
+<h1>Account #{{ account.id }}: {{ account.owner_name }}</h1>
+<div class="cards">
+  <div class="card"><div class="label">Balance (₹)</div><div class="value">{{ account.balance_paise|rupees }}</div></div>
+</div>
+<p><a class="button" href="/ui/send?from={{ account.id }}">Send money from this account</a></p>
+
+<h2>Statement (newest first)</h2>
+{% if entries %}
+<div class="table-wrap"><table>
+  <tr><th>Entry</th><th>Transfer</th><th>Direction</th><th class="num">Amount (₹)</th>
+      <th>Other account</th><th class="num">Balance after (₹)</th><th>Time (UTC)</th></tr>
+  {% for e in entries %}
+  <tr>
+    <td>{{ e.entry_id }}</td>
+    <td><a href="/ui/transfers/{{ e.transfer_id }}">#{{ e.transfer_id }}</a></td>
+    <td class="{{ 'debit' if e.direction == 'DEBIT' else 'credit' }}">{{ e.direction }}</td>
+    <td class="num">{{ e.amount_paise|rupees }}</td>
+    <td><a href="/ui/accounts/{{ e.counterparty_account_id }}">#{{ e.counterparty_account_id }}</a></td>
+    <td class="num">{{ e.balance_after_paise|rupees }}</td>
+    <td>{{ e.created_at.strftime("%Y-%m-%d %H:%M:%S") }}</td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% else %}
+<p class="muted">No entries yet.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,47 @@
+{# Home page (GET /): live ledger health from ledger.check_invariants(), every customer account,
+   and the "open account" form, which POSTs to /ui/accounts. #}
+{% extends "base.html" %}
+{% block title %}Accounts{% endblock %}
+
+{% block content %}
+<h1>Payment ledger</h1>
+
+<h2>Ledger health
+  {% if health.total_balance_paise == 0 and health.accounts_mismatched == 0 and health.transfers_unbalanced == 0 %}
+  <span class="badge ok">BALANCED</span>
+  {% else %}
+  <span class="badge bad">BROKEN</span>
+  {% endif %}
+</h2>
+<p class="muted">Checked live on every page load. A healthy ledger shows 0 in all three.</p>
+<div class="cards">
+  <div class="card"><div class="label">Sum of ALL balances (paise)</div><div class="value">{{ health.total_balance_paise }}</div></div>
+  <div class="card"><div class="label">Accounts whose balance ≠ their entries</div><div class="value">{{ health.accounts_mismatched }}</div></div>
+  <div class="card"><div class="label">Transfers without exactly 1 DEBIT + 1 CREDIT</div><div class="value">{{ health.transfers_unbalanced }}</div></div>
+</div>
+
+<h2>Open an account</h2>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post" action="/ui/accounts">
+  <label>Owner name<input name="owner_name" value="{{ form.owner_name }}" required></label>
+  <label>Opening balance (₹)<input name="initial_balance" value="{{ form.initial_balance }}" placeholder="0.00" inputmode="decimal"></label>
+  <button type="submit">Open account</button>
+</form>
+
+<h2>Accounts</h2>
+{% if accounts %}
+<div class="table-wrap"><table>
+  <tr><th>Account</th><th>Owner</th><th class="num">Balance (₹)</th><th></th></tr>
+  {% for a in accounts %}
+  <tr>
+    <td><a href="/ui/accounts/{{ a.id }}">#{{ a.id }}</a></td>
+    <td>{{ a.owner_name }}</td>
+    <td class="num">{{ a.balance_paise|rupees }}</td>
+    <td><a href="/ui/send?from={{ a.id }}">Send money</a></td>
+  </tr>
+  {% endfor %}
+</table></div>
+{% else %}
+<p class="muted">No accounts yet. Open one above.</p>
+{% endif %}
+{% endblock %}

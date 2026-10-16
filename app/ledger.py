@@ -10,7 +10,7 @@
 # first one commits, then reads the new balance. Locks are always taken in ascending account-id
 # order, so two transactions can never each hold one lock while waiting for the other (deadlock).
 
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from models import Account, LedgerEntry, Transfer
@@ -93,6 +93,12 @@ def create_account(session: Session, owner_name: str, initial_balance_paise: int
 
 def get_account(session: Session, account_id: int) -> Account | None:
     return session.get(Account, account_id)  # SELECT ... WHERE id = :id (None if no such row)
+
+
+def list_accounts(session: Session, limit: int = 200) -> list[Account]:
+    """Customer accounts (not the system account), oldest first. Used by the web home page."""
+    query = select(Account).where(Account.is_system.is_(False)).order_by(Account.id).limit(limit)
+    return list(session.scalars(query))
 
 
 def transfer(session: Session, from_id: int, to_id: int, amount_paise: int) -> Transfer:

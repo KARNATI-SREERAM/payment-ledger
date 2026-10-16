@@ -14,7 +14,9 @@ import json
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+import ledger
 from models import IdempotencyKey
+from schemas import TransferCreate, transfer_json
 
 
 def hash_request(body: dict) -> str:
@@ -47,3 +49,43 @@ def save_response(session: Session, key: str, status: int, body: dict) -> None:
     row = session.get(IdempotencyKey, key)
     row.response_status = status
     row.response_body = body
+
+
+# Business-rule failures from ledger.py -> HTTP status + message. 422 = "understood, but refused".
+LEDGER_ERRORS = {
+    ledger.AccountNotFound: (404, "account not found"),
+    ledger.InsufficientFunds: (422, "insufficient funds"),
+    ledger.SystemAccountNotAllowed: (422, "the system account cannot be used in transfers"),
+}
+
+
+def process_transfer(session: Session, key: str, body: TransferCreate) -> tuple[int, dict, bool]:
+    """The one path money takes, for both the JSON API and the HTML form.
+    Returns (http_status, response_body, replayed). replayed=True means this key was used
+    before and the stored answer is returned: no money moved this time."""
+    request_hash = hash_request(body.model_dump())
+
+    # Steps 1-4 all run in ONE database transaction; only step 4 commits.
+    # 1. Claim the key, or find the response we already gave for it.
+    previous = claim(session, key, request_hash)
+    if previous is not None:
+        if previous.request_hash != request_hash:
+            # Same key, different transfer: almost certainly a client bug. Refuse loudly.
+            detail = "Idempotency-Key was already used for a different request"
+            return 422, {"detail": detail}, False
+        return previous.response_status, previous.response_body, True
+
+    # 2. Do the transfer (not committed yet).
+    try:
+        t = ledger.transfer(session, body.from_account_id, body.to_account_id, body.amount_paise)
+        status, payload = 201, transfer_json(t)
+    except ledger.LedgerError as e:
+        # A refused transfer is ALSO a final answer for this key: a retry gets the same refusal,
+        # even if the balance has changed since. (Nothing was written, so no rollback needed.)
+        status, message = LEDGER_ERRORS[type(e)]
+        payload = {"detail": message}
+
+    # 3. Remember the response under the key.  4. Commit everything together.
+    save_response(session, key, status, payload)
+    session.commit()
+    return status, payload, False

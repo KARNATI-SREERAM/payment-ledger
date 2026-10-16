@@ -71,3 +71,9 @@ class StatementOut(BaseModel):
     account_id: int
     balance_paise: int
     entries: list[StatementLine]  # newest first
+
+
+def transfer_json(transfer) -> dict:
+    # mode="json": datetimes become strings, so the result can also be stored as JSON
+    # (the idempotency record keeps exactly this dict).
+    return TransferOut.model_validate(transfer).model_dump(mode="json")

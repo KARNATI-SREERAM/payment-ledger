@@ -19,6 +19,7 @@ flowchart LR
     end
     PG -.- PG_tables
     LT[locust<br/>profile: loadtest] -->|load| RL
+    BR[Browser<br/>web pages, app/web.py] -->|HTML forms| RL
 ```
 
 What happens inside one database transaction for `POST /transfers`:
@@ -71,7 +72,8 @@ parallel requests never corrupt a balance, and a database crash mid-transfer lea
 - **Concurrency safety.** Account rows are locked with `SELECT ... FOR UPDATE` in ascending id order, which
   prevents deadlocks. A `CHECK` constraint forbids negative balances.
 - **Per-client rate limiting** with a token bucket (429 + `Retry-After`).
-- **Tested for failure.** 44 pytest tests against real Postgres (including concurrency and invariant tests),
+- **Web front end** (server-rendered, no JavaScript): open accounts, send money, read statements, and watch the ledger's invariants live.
+- **Tested for failure.** 44 pytest tests at the measured run (57 since the web front end) against real Postgres (including concurrency and invariant tests),
   a locust load test, and a drill that SIGKILLs Postgres in the middle of a stream of transfers.
 
 ## Run
@@ -102,6 +104,21 @@ curl localhost:8001/accounts/2/statement
 | `POST /transfers` | Move money; **requires `Idempotency-Key`**. 201 / 404 unknown account / 422 insufficient funds |
 | `GET /transfers/{id}` | A transfer with its DEBIT and CREDIT entries |
 | `GET /health` | API + database reachable (not rate limited) |
+
+## Web front end (http://localhost:8001/)
+
+HTML pages served by the same FastAPI app (`app/web.py`, templates in `app/templates/`, no JavaScript):
+
+| Page | What it shows |
+|---|---|
+| `/` | **Ledger health** (sum of all balances, mismatched accounts, unbalanced transfers: all 0 = BALANCED), every account, and an "open account" form |
+| `/ui/accounts/{id}` | Balance and statement: DEBIT/CREDIT, other account, running balance |
+| `/ui/send` | Send-money form with a hidden idempotency key |
+| `/ui/transfers/{id}` | One transfer and its two ledger entries |
+
+The form handler calls the same `process_transfer()` as `POST /transfers`, so the website obeys the same locking, double-entry and
+idempotency rules. **Demo:** fill in the send form and submit it, then press the browser's back button (most browsers show the cached form, with the
+same hidden key) and submit it again. The page says "Replayed… no money moved again", and the balances moved once.
 
 ## Test
 

@@ -1,0 +1,34 @@
+{# One transfer (GET /ui/transfers/{id}): the page a successful payment redirects to. Shows the
+   two double-entry legs (DEBIT on the sender, CREDIT on the receiver) and, if the form was
+   submitted again with the same key, a notice that the stored result was replayed. #}
+{% extends "base.html" %}
+{% block title %}Transfer #{{ transfer.id }}{% endblock %}
+
+{% block content %}
+<h1>Transfer #{{ transfer.id }}</h1>
+{% if replayed %}
+<p class="notice"><b>Replayed:</b> this form was already submitted with the same idempotency key.
+  This is the original transfer; no money moved again.</p>
+{% endif %}
+<div class="cards">
+  <div class="card"><div class="label">Amount (₹)</div><div class="value">{{ transfer.amount_paise|rupees }}</div></div>
+  <div class="card"><div class="label">From</div><div class="value"><a href="/ui/accounts/{{ transfer.from_account_id }}">#{{ transfer.from_account_id }}</a></div></div>
+  <div class="card"><div class="label">To</div><div class="value"><a href="/ui/accounts/{{ transfer.to_account_id }}">#{{ transfer.to_account_id }}</a></div></div>
+</div>
+<p class="muted">Recorded at {{ transfer.created_at.strftime("%Y-%m-%d %H:%M:%S") }} UTC.</p>
+
+<h2>Ledger entries (double-entry)</h2>
+<div class="table-wrap"><table>
+  <tr><th>Account</th><th>Direction</th><th class="num">Amount (₹)</th></tr>
+  {% for e in transfer.entries %}
+  <tr>
+    <td><a href="/ui/accounts/{{ e.account_id }}">#{{ e.account_id }}</a></td>
+    <td class="{{ 'debit' if e.direction == 'DEBIT' else 'credit' }}">{{ e.direction }}</td>
+    <td class="num">{{ e.amount_paise|rupees }}</td>
+  </tr>
+  {% endfor %}
+</table></div>
+<p class="muted">Every transfer has exactly one DEBIT and one CREDIT for the same amount, so money
+  is only ever moved, never created or lost.</p>
+<p><a class="button" href="/ui/send?from={{ transfer.from_account_id }}">Send another</a></p>
+{% endblock %}

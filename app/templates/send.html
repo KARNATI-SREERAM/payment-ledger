@@ -1,0 +1,19 @@
+{# Send-money form (GET /ui/send, and re-shown with an error after a refused POST /ui/transfers).
+   The hidden idempotency_key is generated fresh each time the server renders this form, so
+   submitting the SAME form twice can never move money twice. #}
+{% extends "base.html" %}
+{% block title %}Send money{% endblock %}
+
+{% block content %}
+<h1>Send money</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form method="post" action="/ui/transfers">
+  <input type="hidden" name="idempotency_key" value="{{ key }}">
+  <label>From account<input name="from_account_id" value="{{ form.from_account_id }}" required inputmode="numeric"></label>
+  <label>To account<input name="to_account_id" value="{{ form.to_account_id }}" required inputmode="numeric"></label>
+  <label>Amount (₹)<input name="amount" value="{{ form.amount }}" required placeholder="125.50" inputmode="decimal"></label>
+  <button type="submit">Send</button>
+</form>
+<p class="muted">Idempotency key for this form: <code>{{ key }}</code>. Submitting this form twice
+  (double click, or "resubmit" in the browser) sends the same key, so the money moves only once.</p>
+{% endblock %}

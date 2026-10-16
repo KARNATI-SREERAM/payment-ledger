@@ -37,3 +37,11 @@ def init_db() -> None:
     models.Base.metadata.create_all(engine)  # existing tables are left alone
     with SessionLocal() as session:
         ledger.seed_system_account(session)
+
+
+def get_session():
+    # One session per request (a FastAPI dependency, used by both the JSON and the HTML routes).
+    # `with` closes it, returning the connection to the pool, even if the route raises an
+    # exception. Anything not committed is rolled back on close.
+    with SessionLocal() as session:
+        yield session
