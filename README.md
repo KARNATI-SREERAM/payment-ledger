@@ -104,6 +104,7 @@ curl localhost:8001/accounts/2/statement
 | `POST /transfers` | Move money; **requires `Idempotency-Key`**. 201 / 404 unknown account / 422 insufficient funds |
 | `GET /transfers/{id}` | A transfer with its DEBIT and CREDIT entries |
 | `GET /health` | API + database reachable (not rate limited) |
+| `GET /stats` | Read-only audit snapshot: the 3 invariants, `healthy`, and counts (used by the LedgerOps Copilot) |
 
 ## Web front end (http://localhost:8001/)
 

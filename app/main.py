@@ -77,6 +77,13 @@ def health(session: Session = Depends(get_session)):
     return {"status": "ok"}
 
 
+@app.get("/stats")
+def stats(session: Session = Depends(get_session)):
+    # Read-only audit + counts, for dashboards and the LedgerOps Copilot's get_stats tool.
+    # It scans every table: fine at this size, but at scale it would be cached or sampled.
+    return ledger.stats(session)
+
+
 @app.post("/accounts", status_code=201, response_model=AccountOut)
 def create_account(body: AccountCreate, session: Session = Depends(get_session)):
     return ledger.create_account(session, body.owner_name, body.initial_balance_paise)

@@ -177,3 +177,23 @@ INVARIANTS_SQL = text("""
 def check_invariants(session: Session) -> dict:
     """Audit the whole ledger. A healthy ledger returns all three numbers as 0."""
     return dict(session.execute(INVARIANTS_SQL).one()._mapping)
+
+
+COUNTS_SQL = text("""
+    SELECT (SELECT count(*) FROM accounts WHERE NOT is_system) AS customer_accounts,
+           (SELECT count(*) FROM transfers t JOIN accounts a ON a.id = t.from_account_id
+             WHERE NOT a.is_system) AS customer_transfers,
+           (SELECT count(*) FROM ledger_entries) AS ledger_entries,
+           (SELECT count(*) FROM idempotency_keys) AS idempotency_keys,
+           (SELECT COALESCE(min(balance_paise), 0) FROM accounts WHERE NOT is_system)
+             AS min_customer_balance_paise
+""")
+
+
+def stats(session: Session) -> dict:
+    """The audit plus size counts: one read-only snapshot used by GET /stats and check_ledger.py.
+    Customer transfers exclude opening-balance funding (those come from the system account)."""
+    facts = {**check_invariants(session), **dict(session.execute(COUNTS_SQL).one()._mapping)}
+    facts["healthy"] = (facts["total_balance_paise"] == 0 and facts["accounts_mismatched"] == 0
+                        and facts["transfers_unbalanced"] == 0)
+    return facts
